@@ -1,10 +1,210 @@
 pipeline {
+
   agent any
+
+  tools {
+    maven "Maven3.6.3"
+    jdk "jdk"
+
+  }
   stages {
-    stage('Build') {
-      steps {
-        echo 'Pipeline Test Successful'
+
+    stage('StaticCodeAnalysis') {
+
+      environment {
+        scannerhome = tool 'sonarqube'
       }
+
+      steps {
+
+        git 'https://github.com/dhalarnk/DevOps-Demo-WebApp.git'
+
+        withSonarQubeEnv('sonarqube') {
+          sh "${scannerHome}/bin/sonar-scanner -Dsonar.host.url=${SONAR_HOST_URL} -Dsonar.projectKey=WEBPOC:AVNCommunication -Dsonar.sources=. -Dsonar.tests=. -Dsonar.inclusions=**/test/java/servlet/createpage_junit.java -Dsonar.test.exclusions=**/test/java/servlet/createpage_junit.java -Dsonar.login=admin -Dsonar.password=sonar"
+        }
+      }
+
+      post {
+        always {
+          slackSend channel: 'alerts', color: 'good', message: "Started - Job Name - ${env.JOB_NAME}, Build# - ${env.BUILD_NUMBER}, (<${env.BUILD_URL}|Open>)", tokenCredentialId: 'slack', username: 'jenkins'
+        }
+        success {
+          slackSend channel: 'alerts', color: 'good', message: "Success - Job Name - ${env.JOB_NAME}, Build# - ${env.BUILD_NUMBER}, (<${env.BUILD_URL}|Open>)", tokenCredentialId: 'slack', username: 'jenkins'
+        }
+
+        failure {
+          slackSend channel: 'alerts', color: 'danger', message: "Failed - Job Name - ${env.JOB_NAME}, Build# - ${env.BUILD_NUMBER}, (<${env.BUILD_URL}|Open>)", tokenCredentialId: 'slack', username: 'jenkins'
+        }
+
+      }
+
+    }
+
+    stage('BuildWebApp') {
+      steps {
+
+        git 'https://github.com/dhalarnk/DevOps-Demo-WebApp.git'
+
+        sh "mvn compile"
+
+      }
+    }
+    stage('DeployToTest') {
+      steps {
+
+        git 'https://github.com/dhalarnk/DevOps-Demo-WebApp.git'
+
+        sh "mvn package"
+
+      }
+      post {
+        always {
+          jiraSendBuildInfo branch: 'SQ9DEV-1', site: 'hddevopsjiracloud.atlassian.net'
+        }
+
+        success {
+
+          deploy adapters: [tomcat8(credentialsId: 'tomcat', path: '', url: 'http://3.142.96.139:8080/')],
+            contextPath: '/QAWebapp',
+            war: '**/*.war'
+
+          echo "'Deploy to QA' - completed successfully."
+
+          jiraComment body: 'Build Success - Review Build and Deployment Info for Test server', issueKey: 'SQ9DEV-1'
+          jiraSendDeploymentInfo environmentId: 'Test', environmentName: 'Test', environmentType: 'testing', issueKeys: ['SQ9DEV-1'], serviceIds: [''], site: 'hddevopsjiracloud.atlassian.net', state: 'successful'
+
+        }
+
+        failure {
+          jiraComment body: 'Build Failed - Review Build and Deployment Info for Test server', issueKey: 'SQ9DEV-1'
+          jiraSendDeploymentInfo environmentId: 'Test', environmentName: 'Test', environmentType: 'testing', issueKeys: ['SQ9DEV-1'], serviceIds: [''], site: 'hddevopsjiracloud.atlassian.net', state: 'failed'
+        }
+      }
+    }
+
+    stage('StoreArtifacts') {
+
+      steps {
+
+        git 'https://github.com/dhalarnk/DevOps-Demo-WebApp.git'
+
+        script {
+
+          def server = Artifactory.server 'Artifactory'
+          def rtMaven = Artifactory.newMavenBuild()
+          def buildInfo
+
+          rtMaven.tool = 'Maven3.6.3'
+
+          rtMaven.deployer releaseRepo: 'libs-release-local', snapshotRepo: 'libs-snapshot-local', server: server
+
+          rtMaven.resolver releaseRepo: 'libs-release', snapshotRepo: 'libs-snapshot', server: server
+
+          buildInfo = Artifactory.newBuildInfo()
+
+          buildInfo.env.capture = true
+
+          rtMaven.run pom: 'pom.xml', goals: 'package', buildInfo: buildInfo
+
+          server.publishBuildInfo buildInfo
+
+        }
+      }
+
+    }
+
+    stage('UITest') {
+
+      steps {
+
+        git 'https://github.com/dhalarnk/DevOps-Demo-WebApp.git'
+
+        sh "mvn -f functionaltest/pom.xml test"
+
+      }
+
+      post {
+        success {
+
+          publishHTML([allowMissing: false, alwaysLinkToLastBuild: false, keepAll: false, reportDir: '\\functionaltest\\target\\surefire-reports', reportFiles: 'index.html', reportName: 'UI Test', reportTitles: ''])
+
+          echo "UITest results published successfully."
+        }
+      }
+
+    }
+
+    stage('PerformanceTest') {
+
+      steps {
+
+        blazeMeterTest credentialsId: 'Blazemeter', testId: '9014511.taurus', workspaceId: '756601'
+      }
+
+    }
+
+    stage('DeployToProd') {
+      steps {
+
+        git 'https://github.com/dhalarnk/DevOps-Demo-WebApp.git'
+
+        sh "mvn clean install"
+
+      }
+
+      post {
+
+        always {
+          jiraSendBuildInfo branch: 'SQ9DEV-1', site: 'hddevopsjiracloud.atlassian.net'
+        }
+        success {
+
+          deploy adapters: [tomcat8(credentialsId: 'tomcat', path: '', url: 'http://52.15.194.196:8080/')],
+            contextPath: '/ProdWebapp',
+            war: '**/*.war'
+
+          echo "'Deploy to Prod' - completed successfully."
+
+          jiraComment body: 'Build Success - Review Build and Deployment Info for Prod server', issueKey: 'SQ9DEV-1'
+          jiraSendDeploymentInfo environmentId: 'Prod', environmentName: 'Prod', environmentType: 'production', issueKeys: ['SQ9DEV-1'], serviceIds: [''], site: 'hddevopsjiracloud.atlassian.net', state: 'successful'
+        }
+
+        failure {
+          jiraComment body: 'Build Failed - Review Build and Deployment Info for Prod server', issueKey: 'SQ9DEV-1'
+          jiraSendDeploymentInfo environmentId: 'Prod', environmentName: 'Prod', environmentType: 'production', issueKeys: ['SQ9DEV-1'], serviceIds: [''], site: 'hddevopsjiracloud.atlassian.net', state: 'failed'
+        }
+
+      }
+    }
+
+    stage('SanityTest') {
+
+      steps {
+
+        git 'https://github.com/dhalarnk/DevOps-Demo-WebApp.git'
+
+        sh "mvn -f Acceptancetest/pom.xml test"
+
+      }
+      post {
+
+        always {
+          slackSend channel: 'alerts', color: 'good', message: "Started - Job Name - ${env.JOB_NAME}, Build# - ${env.BUILD_NUMBER}, (<${env.BUILD_URL}|Open>)", tokenCredentialId: 'slack', username: 'jenkins'
+        }
+        success {
+          publishHTML([allowMissing: false, alwaysLinkToLastBuild: false, keepAll: false, reportDir: '\\Acceptancetest\\target\\surefire-reports', reportFiles: 'index.html', reportName: 'Sanity Test Report', reportTitles: ''])
+
+          echo "SanityTest results published successfully."
+          slackSend channel: 'alerts', color: 'good', message: "Success - Job Name - ${env.JOB_NAME}, Build# - ${env.BUILD_NUMBER}, (<${env.BUILD_URL}|Open>)", tokenCredentialId: 'slack', username: 'jenkins'
+
+        }
+
+        failure {
+          slackSend channel: 'alerts', color: 'danger', message: "Failed - Job Name - ${env.JOB_NAME}, Build# - ${env.BUILD_NUMBER}, (<${env.BUILD_URL}|Open>)", tokenCredentialId: 'slack', username: 'jenkins'
+        }
+
+      }
+
     }
 
   }
